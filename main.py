@@ -1,5 +1,7 @@
 from pydantic_ai import Agent, RunContext, ModelRetry
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai.usage import UsageLimits
+from pydantic_ai.exceptions import UsageLimitExceeded, UnexpectedModelBehavior
 from typing import Literal
 from pydantic import BaseModel, Field
 from dataclasses import dataclass
@@ -99,7 +101,7 @@ def customer_preferences(ctx: RunContext[SupportDeps]) -> str:
 
 
 deps = SupportDeps(customer_id="customer-2", orders=ORDERS,
-                   preferred_language="Spanish")
+                   preferred_language="English")
 history: list[ModelMessage] = []
 while True:
     question = input("> ").strip()
@@ -107,12 +109,27 @@ while True:
         break
     if not question:
         continue
-    result = support_agent.run_sync(
-        question,
-        deps=deps,
-        message_history=history
-    )
+    try:
+        result = support_agent.run_sync(
+            question,
+            deps=deps,
+            message_history=history,
+            usage_limits=UsageLimits(request_limit=2, tool_calls_limit=2)
+        )
+    except UsageLimitExceeded as error:
+        print(f"[limit] {error}")
+        continue
+    except UnexpectedModelBehavior as error:
+        print(f"[validation] {error}")
+        continue
     print(result.output.model_dump_json(indent=2))
+    usage = result.usage
+    print(
+        f"[usage] requests={usage.requests}, "
+        f"input_tokens={usage.input_tokens}, "
+        f"output_tokens={usage.output_tokens}"
+    )
+
     history.extend(result.new_messages())
 
 
