@@ -1,4 +1,4 @@
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, ModelRetry
 from typing import Literal
 from pydantic import BaseModel, Field
 from dataclasses import dataclass
@@ -57,14 +57,34 @@ def get_order(ctx: RunContext[SupportDeps], order_id: str) -> dict[str, str]:
     order = ctx.deps.orders.get(order_id)
     if order is None or order["customer_id"] != ctx.deps.customer_id:
         return {"error": "Order not found for the current customer"}
+
     return {
         "status": order["status"],
         "tracking_number": order["tracking_number"]
     }
 
 
+@support_agent.output_validator
+def validate_support_response(
+        ctx: RunContext[SupportDeps],
+        output: SupportResponse) -> SupportResponse:
+    print(
+        f"[validator] retry={ctx.retry}, "
+        f"issue_type={output.issue_type}, "
+        f"needs_human={output.needs_human}"
+    )
+
+    if output.issue_type == "damaged_item" and not output.needs_human:
+        raise ModelRetry(
+            "Damaged items require human support. "
+            "Set needs_human=True and refer the customer to human suppport"
+        )
+    return output
+
+
 question = input("> ")
 deps = SupportDeps(customer_id="customer-2", orders=ORDERS)
 result = support_agent.run_sync(question, deps=deps)
 print(result.output.model_dump_json(indent=2))
+print(result.all_messages())
 # print(dir(result.output))
