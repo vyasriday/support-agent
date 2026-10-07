@@ -1,4 +1,5 @@
 from pydantic_ai import Agent, RunContext, ModelRetry
+from pydantic_ai.messages import ModelMessage
 from typing import Literal
 from pydantic import BaseModel, Field
 from dataclasses import dataclass
@@ -24,11 +25,14 @@ class SupportResponse(BaseModel):
     needs_human: bool = Field(
         description="Whether this request requires human support")
 
+# Generates __init__, __repr__, and __eq__ for this data container; does not validate types.
+
 
 @dataclass
 class SupportDeps:
     customer_id: str
     orders: dict[str, dict[str, str]]
+    preferred_language: str = "English"
 
 
 support_agent = Agent(model, instructions=instructions,
@@ -42,6 +46,7 @@ ORDERS: dict[str, dict[str, str]] = {
 }
 
 
+# Registers a model-requested tool; Pydantic AI supplies ctx, and the model supplies order_id.
 @support_agent.tool
 def get_order(ctx: RunContext[SupportDeps], order_id: str) -> dict[str, str]:
     """Retrieve status and tracking for an order belonging to the current customer.
@@ -53,7 +58,7 @@ def get_order(ctx: RunContext[SupportDeps], order_id: str) -> dict[str, str]:
         dict[str, str]: Returns information regarding a particular order based on order_id
     """
     print(f"[tool] Looking up order {order_id}")
-    print(f"ctx.deps, {ctx.deps}")
+    # print(f"ctx.deps, {ctx.deps}")
     order = ctx.deps.orders.get(order_id)
     if order is None or order["customer_id"] != ctx.deps.customer_id:
         return {"error": "Order not found for the current customer"}
@@ -64,6 +69,7 @@ def get_order(ctx: RunContext[SupportDeps], order_id: str) -> dict[str, str]:
     }
 
 
+# Checks candidate outputs after schema validation; ModelRetry requests a corrected response.
 @support_agent.output_validator
 def validate_support_response(
         ctx: RunContext[SupportDeps],
@@ -82,9 +88,36 @@ def validate_support_response(
     return output
 
 
-question = input("> ")
-deps = SupportDeps(customer_id="customer-2", orders=ORDERS)
-result = support_agent.run_sync(question, deps=deps)
-print(result.output.model_dump_json(indent=2))
-print(result.all_messages())
+# Registers guidance generated from deps for each run and sent to the model with static instructions.
+@support_agent.instructions
+def customer_preferences(ctx: RunContext[SupportDeps]) -> str:
+    print(f"[instructions] language={ctx.deps.preferred_language}")
+    return (
+        f"Write the customer-facing reply in {ctx.deps.preferred_language}. "
+        "Keep issue_type values exactly as defined in the output schema."
+    )
+
+
+deps = SupportDeps(customer_id="customer-2", orders=ORDERS,
+                   preferred_language="Spanish")
+history: list[ModelMessage] = []
+while True:
+    question = input("> ").strip()
+    if (question.lower() == "quit"):
+        break
+    if not question:
+        continue
+    result = support_agent.run_sync(
+        question,
+        deps=deps,
+        message_history=history
+    )
+    print(result.output.model_dump_json(indent=2))
+    history.extend(result.new_messages())
+
+
+# result = support_agent.run_sync(question, deps=deps)
+# print(result.output.model_dump_json(indent=2))
+# history = result.all_messages()
+# print(result.all_messages())
 # print(dir(result.output))
