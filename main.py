@@ -1,5 +1,9 @@
 from pydantic_ai import Agent, RunContext, ModelRetry
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import (
+    ModelMessage,
+    RetryPromptPart,
+    ToolCallPart,
+    ToolReturnPart)
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded, UnexpectedModelBehavior
 from typing import Literal
@@ -7,6 +11,7 @@ from pydantic import BaseModel, Field
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from datetime import date, timedelta
+from time import perf_counter
 import asyncio
 load_dotenv()
 
@@ -158,6 +163,24 @@ def customer_preferences(ctx: RunContext[SupportDeps]) -> str:
     )
 
 
+def print_run_details(messages: list[ModelMessage]) -> None:
+    for message in messages:
+        for part in message.parts:
+            if isinstance(part, ToolCallPart):
+                print(
+                    f"[call] id={part.tool_call_id}, tool={part.tool_name}, "
+                    f"args={part.args_as_dict()}"
+                )
+            elif isinstance(part, ToolReturnPart):
+                print(
+                    f"[return] id={part.tool_call_id}, tool={part.tool_name}, "
+                    f"result={part.content!r}"
+                )
+            elif isinstance(part, RetryPromptPart):
+                print(
+                    f"[retry] tool={part.tool_name}, details={part.content!r}")
+
+
 async def main() -> None:
     deps = SupportDeps(customer_id="customer-2",
                        orders=ORDERS, as_of=date(2026, 10, 8))
@@ -168,6 +191,7 @@ async def main() -> None:
             break
         if not question:
             continue
+        started_at = perf_counter()
         try:
             async with support_agent.run_stream(
                 question,
@@ -203,7 +227,10 @@ async def main() -> None:
         print(output.model_dump_json(indent=2))
         print(f"[usage] {usage}")
         history.extend(new_messages)
-        # history.extend(result.new_messages())
+        elapsed = perf_counter() - started_at
+        print(f"[timing] elapsed={elapsed:.2f}s")
+        print_run_details(new_messages)
+# history.extend(result.new_messages())
 if __name__ == "__main__":
     asyncio.run(main())
 # result = support_agent.run_sync(question, deps=deps)

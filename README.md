@@ -2,7 +2,7 @@
 
 A command-line support agent for a fictional online store, built to learn Pydantic AI.
 It uses an OpenAI model and Python tools to look up orders, check customer ownership,
-explain return policy, and produce structured responses. The project explores
+calculate return eligibility, and produce structured responses. The project explores
 dependencies, validation, conversation history, language preferences, and usage limits.
 
 The agent uses fake data and does not process real refunds or cancellations.
@@ -15,12 +15,15 @@ The full learning guide and reusable agent-building roadmap are included below.
 Build an order-support agent for a fictional online store, one concept at a time.
 This is a learning project with fake data, not a production support system.
 
-This log summarizes Lessons 1-9 and introduces Lesson 10's eligibility-tool
-exercise. Validated order records, async execution, and streaming
-are implemented; the user reports the streaming checkpoint works as expected.
+This log summarizes Lessons 1-10 and Lesson 11A's local observability exercise.
+Eligibility checks, validated order records, async execution, streaming, and
+local execution logs are implemented. The user reports the streaming checkpoint
+works as expected; individual live observability results were not shared.
 It is updated after each lesson. Examples
 are focused excerpts, not replacements for the complete application in [main.py](main.py).
-Testing lessons are deferred while we explore more agent concepts.
+The project is paused here. Logfire is not installed or configured, and testing
+is deferred. The future lessons below are a study roadmap, not implemented features
+or a commitment to continue development in this repository.
 
 ## Contents
 
@@ -36,6 +39,9 @@ Testing lessons are deferred while we explore more agent concepts.
 | [8](#lesson-8-usage-limits-and-error-handling) | Usage accounting and bounded runs | `UsageLimits`, `result.usage` |
 | [9](#lesson-9-async-execution-and-structured-streaming) | Async execution and structured-streaming exercise | `run()`, `run_stream()`, `stream_output()` |
 | [10](#lesson-10-deterministic-return-eligibility) | Typed records and deterministic eligibility exercise | `BaseModel`, `date`, typed tool results |
+| [11](#lesson-11-observability) | Local tool-call records and run timing | `new_messages()`, message parts, `perf_counter()` |
+
+Further study: [Future Lessons](#future-lessons-planned-not-yet-started).
 
 ## How The Pieces Fit Together
 
@@ -692,10 +698,11 @@ and [Coroutines and tasks](https://docs.python.org/3/library/asyncio-task.html).
 
 ## Lesson 10: Deterministic Return Eligibility
 
-**Status:** Part A's typed records and attribute-based ownership check are
-implemented in [main.py](main.py). The user advanced without sharing individual
-lookup results. Part B's eligibility exercise is introduced below but is not
-yet implemented; its live model-driven checkpoint is pending.
+**Status:** Both parts are implemented in [main.py](main.py): typed order records,
+an ownership-checked eligibility tool, and an application-supplied reference date.
+The user found the exercise useful but has not shared individual live responses
+or tool-call records. The local example checks below are separate from real-model
+verification.
 
 **Goal:** Let Python calculate policy decisions from reliable records, while the
 model interprets customer requests and explains the resulting decisions.
@@ -935,6 +942,8 @@ requests. If the model also performs a status lookup on a separate turn within
 the run, it may need three. Change the active streaming budget to
 `UsageLimits(request_limit=4, tool_calls_limit=2)` for this exercise.
 This allows bounded extra steps, not final-output retries in `run_stream()`.
+The current application uses `request_limit=4` and `tool_calls_limit=4`; the
+second limit bounds tool executions, not model requests.
 
 #### Checkpoint And Boundaries
 
@@ -958,16 +967,20 @@ For the same order delivered on October 1, changing the trusted `as_of` to
 October 31 gives day 30 and permits an unused-item return; November 1 gives day
 31 and denies it. Restart between reference-date experiments so history does not
 contain a stale eligibility decision. We checked these date boundaries and tool
-branches locally without provider calls; user live results are still pending.
+branches in the documented examples locally without provider calls. The user
+has implemented the exercise, but individual live results were not shared.
 
 **New flow:** customer question -> model requests eligibility tool -> Python
 checks access and calculates policy -> typed result returned to model -> model
 explains it in a structured support response. Checking eligibility remains
 read-only; it does not create a return, issue a refund, or verify item condition.
 
-The application has not yet been changed to include this tool. Apply the
-exercise, share an eligible-return response and its tool log, then proceed to
-observability. Automated testing remains deferred.
+**Takeaway:** Let the model interpret the request and explain the answer, but
+calculate policy decisions in ordinary Python. Keep application-controlled facts
+such as identity and the reference date separate from model-supplied arguments.
+Unknown eligibility is not the same as rejection, and neither the typed tool
+result nor its registration automatically guarantees the final prose agrees.
+Observability is the next planned lesson; automated testing remains deferred.
 
 **Read more:** [Function tools and return values](https://pydantic.dev/docs/ai/tools-toolsets/tools/),
 [Dependencies](https://pydantic.dev/docs/ai/core-concepts/dependencies/),
@@ -975,6 +988,169 @@ and [Structured final output](https://pydantic.dev/docs/ai/core-concepts/output/
 Python background: [Pydantic models](https://docs.pydantic.dev/latest/concepts/models/),
 [Date validation](https://docs.pydantic.dev/latest/api/standard_library_types/#dates),
 and [Python date arithmetic](https://docs.python.org/3/library/datetime.html#date-objects).
+
+## Lesson 11: Observability
+
+**Status:** Part A's local message inspector and elapsed-time measurement are
+implemented. Individual live observability results were not shared. The project
+is paused; Part B's instrumentation is deferred, and Logfire is not installed
+or configured.
+
+**Goal:** Inspect what the agent actually did instead of inferring execution
+from a plausible final answer. In particular, see whether the model requested
+`check_return_eligibility`, which condition it supplied, and what Python returned.
+
+### Logs, Metrics, And Traces
+
+| Signal | What it answers | Example |
+| --- | --- | --- |
+| Log | What event occurred? | A tool returned an eligibility decision |
+| Metric | How much or how often? | Requests, tokens, latency, or error frequency |
+| Trace | Which timed operations belong to one interaction? | Agent run with child model-request and tool-execution spans |
+
+A span is a timed operation within a trace. Related spans help distinguish model
+waiting, tool execution, and application overhead. Our current print statements
+are logs, and our usage summary reports per-run measurements; neither is a full
+distributed trace. Observability records behavior, not the model's private
+reasoning, and it does not itself validate correctness or improve model decisions.
+
+### Part A: A Local Execution Log
+
+Start with the messages Pydantic AI already records. This adds no package,
+telemetry account, model request, or new outbound destination. OpenAI continues
+to receive the normal agent requests as before. The new inspector prints tool
+content locally, so use fake data and review what terminal logs retain.
+
+#### 1. Add Imports
+
+Replace the current `ModelMessage` import with:
+
+```python
+from pydantic_ai.messages import (
+	ModelMessage,
+	RetryPromptPart,
+	ToolCallPart,
+	ToolReturnPart,
+)
+from time import perf_counter
+```
+
+`ToolCallPart` records a requested call. `ToolReturnPart` records a returned
+result. Their `tool_call_id` links a request to its result even when several
+tools were requested. `RetryPromptPart` records feedback asking the model to
+correct a problem; seeing that feedback is different from seeing a successful
+tool result. Framework-generated output-tool calls can also appear in these
+messages, not just our two business tools.
+
+#### 2. Add A Plain Logging Helper
+
+Define this above `main`, without an agent decorator:
+
+```python
+def print_run_details(messages: list[ModelMessage]) -> None:
+	for message in messages:
+		for part in message.parts:
+			if isinstance(part, ToolCallPart):
+				print(
+					f"[call] id={part.tool_call_id}, tool={part.tool_name}, "
+					f"args={part.args_as_dict()}"
+				)
+			elif isinstance(part, ToolReturnPart):
+				print(
+					f"[return] id={part.tool_call_id}, tool={part.tool_name}, "
+					f"result={part.content!r}"
+				)
+			elif isinstance(part, RetryPromptPart):
+				print(f"[retry] tool={part.tool_name}, details={part.content!r}")
+```
+
+This helper is ordinary application code, not a model-callable tool. The framework
+does not invoke it automatically; we explicitly call it after a successful turn.
+`args_as_dict()` reads structured tool arguments without hand-parsing JSON strings.
+`!r` displays a Python representation of the returned content, which can be a
+dictionary or a Pydantic object, rather than assuming it is already a JSON string.
+
+For our fake return question, illustrative records are:
+
+```text
+[call] id=call_example, tool=check_return_eligibility, args={'order_id': '144', 'condition': 'unused'}
+[return] id=call_example, tool=check_return_eligibility, result=ReturnEligibility(eligible=True, reason='The unused item is within the 30-day return window', deadline=datetime.date(2026, 10, 31), needs_human=False)
+```
+
+Actual IDs and content representation vary. A call record alone only shows that
+the model requested a tool; the corresponding result tells us what execution
+produced. A name such as `final_result` normally identifies a generated output
+submission, not an order lookup or refund operation. Do not equate every call
+part with a business-tool execution or with one model request.
+
+#### 3. Measure The Turn
+
+Inside the question loop, immediately before the existing `try`, add:
+
+```python
+		started_at = perf_counter()
+```
+
+Leave the current streaming block and its exception handlers intact. After those
+handlers, in the successful-turn section, add these lines before
+`history.extend(new_messages)`:
+
+```python
+		elapsed = perf_counter() - started_at
+		print(f"[timing] elapsed={elapsed:.2f}s")
+		print_run_details(new_messages)
+```
+
+`perf_counter()` is a monotonic elapsed-time clock, not a calendar date. Starting
+it after terminal input excludes time spent composing the question. This duration
+includes model requests, tools, stream consumption, and application work until
+the measurement; it is not pure model latency or time to first token. It does
+not replace the trusted `deps.as_of` date used for business rules.
+
+We inspect `new_messages`, not all conversation history, so earlier calls are
+not printed again on every turn. This reports a successful run after completion,
+not live events while the model works. Existing `continue` handlers deliberately
+skip this helper on failed turns; they report the error but not a failed turn's
+full recorded messages. Detailed failure and per-operation timing need additional
+instrumentation or message capture, not fabricated success logs.
+
+#### Checkpoint
+
+Restart and ask "Can I return unused order 144?". Check for a request to
+`check_return_eligibility` with `condition='unused'`, its result with deadline
+October 31, the final answer, and the timing summary. Compare the tool result
+with the answer: they can disagree even though each is well-formed.
+
+In a fresh conversation ask "Can I return order 144?" without supplying condition.
+The expected tool input is `unknown`; if the model invents `unused`, the log
+exposes that extraction mistake. We have not added enforcement that guarantees
+this input choice. A previously stated condition in history is not unknown.
+Ask about an unauthorized order and confirm the returned result contains no
+other customer's private details. Share one call/result pair and the timing log.
+
+### Part B: Instrumentation And Logfire
+
+For graphical traces and per-model/per-tool timing, Pydantic AI provides optional
+OpenTelemetry instrumentation. Pydantic Logfire is one supported backend, not
+the model or the validation library. Its SDK can record agent runs and child
+spans; content settings determine whether prompts, arguments, and results are
+included. A production tracing design must also consider access, retention,
+redaction, identifiers, and where the exporter sends data.
+
+No Logfire package, account, authentication, or exporter has been configured in
+this exercise. Before using hosted telemetry, make the destination and content
+policy explicit. Do not blindly capture raw HTTP headers or bodies, which may
+contain credentials and customer data. Disabling content in instrumentation also
+does not sanitize arbitrary application `print()` statements or custom log fields.
+
+The local inspector is a first step, not a substitute for tracing, alerting,
+evaluations, or tests. We can add instrumentation after the local checkpoint.
+
+**Read more:** [Messages and chat history](https://pydantic.dev/docs/ai/core-concepts/message-history/),
+[Messages API](https://pydantic.dev/docs/ai/api/pydantic-ai/messages/),
+[Debugging and monitoring](https://pydantic.dev/docs/ai/core-concepts/agent/#debugging-and-monitoring),
+and [Logfire and OpenTelemetry](https://pydantic.dev/docs/ai/integrations/logfire/).
+Python background: [perf_counter](https://docs.python.org/3/library/time.html#time.perf_counter).
 
 ## Trace: Customer-2 Asks About Order 144
 
@@ -1035,24 +1211,93 @@ substitute for authentication, authorization, or deterministic business logic.
 
 ### Current Project Gaps
 
-- We retrieve status and tracking; we do not independently calculate return eligibility.
-- The current code stores a delivery date, but the 30-day calculation remains
-	instructions-only until Lesson 10B's tool exercise is applied. The exercise
-	introduces a trusted reference date and explicitly customer-reported condition.
+- The eligibility tool now calculates the 30-day rule in Python using stored
+	dates and an application-supplied reference date. Item condition is still
+	customer-reported, and the model chooses which condition argument to supply.
+- The final-output validator does not cross-check every return claim against the
+	eligibility tool result; correct computation does not ensure faithful prose.
 - Customer identity is simulated; there is no actual login or authentication.
 - History is in memory, unbounded, and not persisted or refreshed automatically.
 - The agent does not issue refunds, cancel orders, or create real support tickets.
 - Schema validation does not guarantee factual grounding or correct classification.
 - Provider-specific error handling and a repeatable test/evaluation suite are not implemented.
 
-### Next Lessons: Planned, Not Yet Completed
+## Future Lessons: Planned, Not Yet Started
 
-| Lesson | Concept | Intended project addition | Official documentation |
+All topics in this section are future study. The repository remains paused, and
+these exercises can be explored in another project. Logging and testing are
+listed separately below rather than included in the main learning sequence.
+
+### Recommended Next Topics
+
+Start with these four topics in this order. Each extends the single-agent concepts
+already learned without requiring a multi-agent architecture.
+
+| Order | Topic | What to learn | Practice idea | Official documentation |
+| --- | --- | --- | --- | --- |
+| 1 | Human approval and deferred tools | Pause a proposed action, collect approval or external results, and resume the run | Request explicit approval before a simulated refund; recheck authorization and eligibility before execution | [Deferred tools](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/) |
+| 2 | Persistent history and context management | Serialize and restore messages, scope sessions by customer, and trim or summarize growing history | Continue a conversation after restarting; avoid retaining stale eligibility results | [Messages and history](https://pydantic.dev/docs/ai/core-concepts/message-history/), [Persistence](https://pydantic.dev/docs/ai/core-concepts/persistence/) |
+| 3 | Retrieval-Augmented Generation (RAG) and embeddings | Retrieve relevant source material before answering; understand semantic search and grounding | Search a collection of store policies and return source references rather than placing every document in instructions | [Embeddings](https://pydantic.dev/docs/ai/guides/embeddings/), [RAG example](https://pydantic.dev/docs/ai/examples/data-analytics/rag/) |
+| 4 | Toolsets and MCP | Group reusable tools and connect to external tools through Model Context Protocol | Separate order and account toolsets, then connect a read-only ticket-search MCP server | [Toolsets](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/), [MCP overview](https://pydantic.dev/docs/ai/mcp/overview/) |
+
+Approval does not replace authorization. A resumed action still needs current
+access checks and duplicate-execution protection. Stored history is application
+state, not model training. RAG is a retrieval pattern: Pydantic AI does not
+automatically supply a document database or managed vector store. MCP is a tool
+connection protocol, not a guarantee that a connected tool is trusted or safe.
+
+### Reliability And Control
+
+Choose these topics when the application needs tighter behavior or more reliable
+execution. They build on, rather than replace, our existing validators and budgets.
+
+| Topic | What to learn | Practice idea | Official documentation |
 | --- | --- | --- | --- |
-| 11 | Observability | Inspect calls, validation, latency, and usage through traces | [Debugging and monitoring](https://pydantic.dev/docs/ai/core-concepts/agent/#debugging-and-monitoring) |
-| 12 | Human approval for actions | Learn deferred execution before adding any real write operation | [Deferred tools](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/) |
-| 13 | Testing and evaluation | Deliberately exercise bad outputs, access denial, and model decision quality | [Dependencies in tests](https://pydantic.dev/docs/ai/core-concepts/dependencies/#overriding-dependencies), [Systematic testing with evals](https://pydantic.dev/docs/ai/core-concepts/agent/#systematic-testing-with-evals) |
+| Advanced function tools | Dynamic tool availability, custom schemas, argument checks, tool failures, and parallel versus sequential execution | Hide irrelevant tools while still enforcing access in Python; serialize conflicting writes | [Advanced tools](https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/) |
+| Model configuration and fallbacks | Provider differences, supported model settings, model selection, and fallback conditions | Use a cheaper model for simple questions and a configured fallback for selected provider failures | [Models and providers](https://pydantic.dev/docs/ai/models/overview/), [Model settings](https://pydantic.dev/docs/ai/core-concepts/agent/#additional-configuration) |
+| Timeouts, cancellation, and retry layers | Bound requests and tools; distinguish model-correction retries from transport retries; understand cancellation cleanup | Stop a stalled order-service lookup without assuming already executed actions were rolled back | [Timeouts](https://pydantic.dev/docs/ai/core-concepts/timeouts/), [Retries](https://pydantic.dev/docs/ai/core-concepts/retries/), [Cancellation](https://pydantic.dev/docs/ai/core-concepts/agent/#cancelling-a-run) |
+| Advanced output contracts | Tool, native, and prompted output modes; unions; output functions; stricter data constraints | Return either a resolved request or a typed escalation instead of encoding both in ambiguous prose | [Output](https://pydantic.dev/docs/ai/core-concepts/output/) |
+| Full-run streaming and iteration | Inspect execution through events or graph iteration while preserving the required run progression | Stream UI updates through tool steps and output-correction attempts instead of only the selected final-output stream | [Running agents and event streams](https://pydantic.dev/docs/ai/core-concepts/agent/#running-agents) |
 
-Future lessons can adjust this sequence to match the project's needs. After each
-lesson, add its goal, concepts, code change, observations, limitations, and official
-documentation links; do not mark planned or untested behavior as demonstrated.
+Fallbacks can change capability, quality, cost, and data destination; they are not
+automatic substitutes for error handling. Output-mode and model-setting support
+varies by provider. Cancellation does not undo a refund or another side effect.
+
+### Advanced Or Domain-Specific Topics
+
+These are optional. Learn them when a real requirement justifies the added
+complexity, not because every agent is expected to use them.
+
+| Topic | What to learn | Practice idea | Official documentation |
+| --- | --- | --- | --- |
+| Multimodal input | Supply images, PDFs, audio, or other supported media and understand provider limitations | Analyze a damaged-item photo or extract details from an invoice, treating model interpretation as unverified | [Multimodal input](https://pydantic.dev/docs/ai/core-concepts/input/) |
+| Native and ready-made tools | Distinguish provider-executed tools from functions executed by our application | Add supported web search without claiming Python directly executes the provider's search engine | [Native tools](https://pydantic.dev/docs/ai/tools-toolsets/native-tools/), [Common tools](https://pydantic.dev/docs/ai/tools-toolsets/common-tools/) |
+| Hooks and reusable capabilities | Customize lifecycle behavior and package related tools, instructions, and settings for reuse | Share a policy-control capability across several independently configured agents | [Hooks](https://pydantic.dev/docs/ai/core-concepts/hooks/), [Capabilities](https://pydantic.dev/docs/ai/capabilities/overview/) |
+| Multi-agent patterns | Distinguish delegation, handoffs, and application-controlled orchestration; manage shared context and budgets | Route genuinely separate billing and shipping responsibilities to specialist agents | [Multi-agent patterns](https://pydantic.dev/docs/ai/guides/multi-agent-applications/) |
+| Typed workflow graphs | Use the related pydantic-graph library for explicit state, branching, and parallel steps | Model a return workflow as lookup, eligibility, approval, and action steps rather than leaving every transition to the model | [Pydantic Graph](https://pydantic.dev/docs/ai/graph/graph/) |
+| Web and frontend integrations | Serve agents through an application and stream structured UI events with session isolation | Build a customer chat interface with approval controls and server-side credentials | [UI integrations](https://pydantic.dev/docs/ai/integrations/ui/overview/), [FastAPI chat example](https://pydantic.dev/docs/ai/examples/conversational-agents/chat-app/) |
+| Durable execution | Integrate an execution engine so long-running workflows can recover after a crash | Resume a pending approval or background operation without unintentionally repeating completed actions | [Durable execution](https://pydantic.dev/docs/ai/capabilities/durable_execution/overview/) |
+
+One agent is often sufficient. Multi-agent systems add coordination and failure
+paths. Graphs help control workflow, but are a related library rather than a
+requirement for basic Agent usage. Durable execution requires a backend and
+careful handling of side effects; ordinary message persistence alone is not
+durable execution.
+
+### Deferred Separately
+
+- **Lesson 11B: Logfire and OpenTelemetry.** Not installed or configured.
+	[Documentation](https://pydantic.dev/docs/ai/integrations/logfire/).
+- **Testing and evaluations.** Still important before production, but postponed
+	at the user's request and not part of the roadmap above.
+	[Agent testing](https://pydantic.dev/docs/ai/guides/testing/) and
+	[Pydantic Evals](https://pydantic.dev/docs/ai/evals/evals/).
+
+The suggested order is flexible; these topics are not completed lessons. The
+current project uses Pydantic AI `2.54.0`. Check API availability and provider
+support before applying examples from newer documentation; do not upgrade or
+expand the project solely to follow this list.
+
+When lessons resume, update this README with the goal, concepts, code changes,
+observations, limitations, and official links. Keep implemented, locally checked,
+and live-model-verified behavior distinct. Do not recreate a separate learning log.
